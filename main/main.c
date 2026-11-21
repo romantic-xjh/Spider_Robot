@@ -175,7 +175,7 @@ static bool handle_speech(int16_t *pcm)
     }
 
     /* 2. ASR 识别 */
-    char text[512];
+    static char text[512];
     if (cloud_asr(pcm, total, text, sizeof(text)) != ESP_OK) {
         ESP_LOGE(TAG, "语音识别失败");
         return false;
@@ -202,7 +202,7 @@ static bool handle_speech(int16_t *pcm)
     ESP_LOGI(TAG, "问句: %s", q);
 
     /* 5. 大模型对话 */
-    char reply[1024];
+    static char reply[1024];
     if (cloud_llm(q, reply, sizeof(reply)) != ESP_OK) {
         ESP_LOGE(TAG, "大模型对话失败");
         return true;   /* 已唤醒，只是问答失败 */

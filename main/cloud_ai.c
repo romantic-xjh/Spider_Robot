@@ -370,7 +370,7 @@ esp_err_t cloud_tts(const char *text, int16_t **pcm_out, size_t *samples_out)
     cJSON *output = cJSON_GetObjectItem(jresp, "output");
     cJSON *audio  = output ? cJSON_GetObjectItem(output, "audio") : NULL;
     cJSON *url    = audio ? cJSON_GetObjectItem(audio, "url") : NULL;
-    char audio_url[1024];
+    static char audio_url[1024];
     if (!cJSON_IsString(url)) {
         ESP_LOGE(TAG, "TTS: no audio url in response");
         cJSON_Delete(jresp);
