@@ -182,26 +182,35 @@ static bool handle_speech(int16_t *pcm)
     }
     ESP_LOGI(TAG, "识别: %s", text);
 
-    /* 3. 匹配唤醒词 */
-    const char *q = match_wake_word(text);
-    if (q == NULL) {
-        return false;
-    }
-
-    /* 4. 只说了唤醒词，没带问句 */
-    if (*q == '\0') {
-        ESP_LOGI(TAG, "唤醒");
-        int16_t *a = NULL;
-        size_t n = 0;
-        if (cloud_tts("我在", &a, &n) == ESP_OK) {
-            speaker_play(a, n, portMAX_DELAY);
-            free(a);
+    /* 3. 决定是否需要唤醒词：休眠态必须带唤醒词，活跃态直接问答 */
+    const char *q = NULL;
+    if (s_state == APP_SLEEP) {
+        q = match_wake_word(text);
+        if (q == NULL) {
+            ESP_LOGI(TAG, "忽略");   /* 不是唤醒词 */
+            return false;
         }
-        return true;
+        if (*q == '\0') {
+            /* 只说了唤醒词，回「我在」，进入活跃 */
+            ESP_LOGI(TAG, "唤醒");
+            int16_t *a = NULL;
+            size_t n = 0;
+            if (cloud_tts("我在", &a, &n) == ESP_OK) {
+                speaker_play(a, n, portMAX_DELAY);
+                free(a);
+            }
+            return true;
+        }
+    } else {
+        /* 活跃态：不用唤醒词，跳过前导标点直接问 */
+        q = skip_punct(text);
+        if (*q == '\0') {
+            return false;
+        }
     }
     ESP_LOGI(TAG, "问句: %s", q);
 
-    /* 5. 大模型对话 */
+    /* 4. 大模型对话 */
     static char reply[1024];
     if (cloud_llm(q, reply, sizeof(reply)) != ESP_OK) {
         ESP_LOGE(TAG, "大模型对话失败");
@@ -209,12 +218,15 @@ static bool handle_speech(int16_t *pcm)
     }
     ESP_LOGI(TAG, "回答: %s", reply);
 
-    /* 6. 语音合成 + 播放 */
+    /* 5. 语音合成 + 播放 */
     int16_t *audio = NULL;
     size_t audio_samples = 0;
     if (cloud_tts(reply, &audio, &audio_samples) == ESP_OK) {
+        ESP_LOGI(TAG, "播放 %d 样本", (int)audio_samples);
         speaker_play(audio, audio_samples, portMAX_DELAY);
         free(audio);
+    } else {
+        ESP_LOGE(TAG, "语音合成失败");
     }
     return true;
 }

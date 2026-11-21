@@ -88,8 +88,10 @@ static esp_err_t http_request(const char *url,
     if (auth_header != NULL) {
         esp_http_client_set_header(client, "Authorization", auth_header);
     }
-    esp_http_client_set_header(client, "Content-Type", "application/json");
+    /* 只有带 body 的 POST 才加 Content-Type；GET 下载音频时不能加，
+     * 否则会破坏 OSS 签名 URL 的签名校验（403 SignatureDoesNotMatch） */
     if (body != NULL) {
+        esp_http_client_set_header(client, "Content-Type", "application/json");
         esp_http_client_set_post_field(client, body, body_len);
     }
 
@@ -387,6 +389,7 @@ esp_err_t cloud_tts(const char *text, int16_t **pcm_out, size_t *samples_out)
     if (err != ESP_OK) {
         return err;
     }
+    ESP_LOGI(TAG, "下载音频 %d 字节", (int)audio_len);
 
     *pcm_out     = (int16_t *)audio_data;
     *samples_out = audio_len / sizeof(int16_t);

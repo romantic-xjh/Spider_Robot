@@ -44,7 +44,9 @@ esp_err_t speaker_play(const int16_t *buf, size_t samples, TickType_t timeout)
     }
 
     size_t bytes_written = 0;
-    return i2s_channel_write(s_tx_chan, buf, samples * sizeof(int16_t), &bytes_written, timeout);
+    esp_err_t ret = i2s_channel_write(s_tx_chan, buf, samples * sizeof(int16_t), &bytes_written, timeout);
+    ESP_LOGI(TAG, "I2S 写入 %d / %d 字节", (int)bytes_written, (int)(samples * sizeof(int16_t)));
+    return ret;
 }
 
 esp_err_t speaker_deinit(void)
