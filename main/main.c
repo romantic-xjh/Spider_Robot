@@ -29,8 +29,8 @@ static const char *TAG = "main";
 #define ASR_RETRY_COUNT         2        /* ASR 失败后的重试次数（不含首次），即总共最多 3 次 */
 
 /* ==================== 触发 / 休眠参数 ==================== */
-#define TRIGGER_RMS_THRESHOLD   1000      /* 检测到说话的阈值（RMS），可调 */
-#define SILENCE_RMS_THRESHOLD   400      /* 静音阈值（RMS），低于它算静音，可调 */
+#define TRIGGER_RMS_THRESHOLD   1800      /* 检测到说话的阈值（RMS），可调 */
+#define SILENCE_RMS_THRESHOLD   1000      /* 静音阈值（RMS），低于它算静音，可调 */
 #define SLEEP_AFTER_SILENCE_MS  10000    /* 连续 10 秒静音后进入休眠 */
 
 /* ==================== 唤醒词（从长到短，避免前缀误匹配） ==================== */
