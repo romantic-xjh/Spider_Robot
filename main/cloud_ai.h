@@ -15,7 +15,7 @@ extern "C" {
 /* 模型名：如果你的账号里没有下面这些模型，请换成控制台里可用的模型名 */
 #define ASR_MODEL           "qwen-audio-3.1-asr-flash"   // 语音识别（语音转文字）
 #define LLM_MODEL           "qwen-plus"                  // 对话大模型
-#define TTS_MODEL           "cosyvoice-v3-plus"          // 语音合成
+#define TTS_MODEL           "cosyvoice-v3-flash"         // 语音合成（快版，比 plus 快、便宜一半）
 #define TTS_VOICE           "longanyang"                 // 音色（可在控制台试听其他音色）
 
 /* 音频统一采样率：麦克风、扬声器、云端三方一致，都是 16kHz */

@@ -293,12 +293,19 @@ esp_err_t cloud_llm(const char *user_text, char *reply_out, size_t reply_out_len
     cJSON_AddItemToArray(messages, user);
 
     cJSON_AddItemToObject(root, "messages", messages);
+    cJSON_AddTrueToObject(root, "enable_search");   // 开启联网搜索能力
+
+    /* 强制联网搜索：qwen-plus 默认会自行判断是否联网，问天气时经常判断失误不搜 */
+    cJSON *search_options = cJSON_CreateObject();
+    cJSON_AddTrueToObject(search_options, "forced_search");
+    cJSON_AddItemToObject(root, "search_options", search_options);
 
     char *body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (body == NULL) {
         return ESP_ERR_NO_MEM;
     }
+    ESP_LOGI(TAG, "LLM 请求体: %s", body);
 
     char auth[128];
     build_auth_header(auth, sizeof(auth));
