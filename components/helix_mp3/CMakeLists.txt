@@ -1,0 +1,4 @@
+idf_component_register(SRCS "bitstream.c" "buffers.c" "dct32.c" "dequant.c" "dqchan.c"
+                    "huffman.c" "hufftabs.c" "imdct.c" "mp3dec.c" "mp3tabs.c"
+                    "polyphase.c" "scalfact.c" "stproc.c" "subband.c" "trigtabs.c"
+                    INCLUDE_DIRS ".")

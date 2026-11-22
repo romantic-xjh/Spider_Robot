@@ -7,6 +7,7 @@
 #include "cJSON.h"
 #include "mbedtls/base64.h"
 #include "cloud_ai.h"
+#include "mp3dec.h"
 
 static const char *TAG = "cloud_ai";
 
@@ -284,7 +285,7 @@ esp_err_t cloud_llm(const char *user_text, char *reply_out, size_t reply_out_len
     cJSON *messages = cJSON_CreateArray();
     cJSON *sys = cJSON_CreateObject();
     cJSON_AddStringToObject(sys, "role", "system");
-    cJSON_AddStringToObject(sys, "content", "你是一个友好的中文语音助手，回答简洁明了，一般不超过两句话。");
+    cJSON_AddStringToObject(sys, "content", "你是一个友好的中文语音助手，回答简洁明了，不超过15个字。");
     cJSON_AddItemToArray(messages, sys);
 
     cJSON *user = cJSON_CreateObject();
@@ -340,6 +341,112 @@ esp_err_t cloud_llm(const char *user_text, char *reply_out, size_t reply_out_len
 
 /* ==================== 语音合成（TTS） ==================== */
 
+/* 跳过 ID3v2 标签，返回真正 mp3 帧的起始位置和长度 */
+static const uint8_t *skip_id3v2(const uint8_t *data, size_t len, size_t *out_len)
+{
+    if (len > 10 && data[0] == 'I' && data[1] == 'D' && data[2] == '3') {
+        /* ID3v2 头：10 字节 + synchsafe 大小 */
+        uint32_t tag_size = ((uint32_t)data[6] << 21) |
+                            ((uint32_t)data[7] << 14) |
+                            ((uint32_t)data[8] << 7)  |
+                            ((uint32_t)data[9]);
+        size_t skip = 10 + tag_size;
+        if (data[5] & 0x10) {   /* footer present (ID3v2.4) */
+            skip += 10;
+        }
+        if (skip < len) {
+            *out_len = len - skip;
+            return data + skip;
+        }
+    }
+    *out_len = len;
+    return data;
+}
+
+/* 把 MP3 数据解码成 16bit PCM，*pcm_out 由调用者 free */
+static esp_err_t mp3_to_pcm(const uint8_t *mp3_data, size_t mp3_len,
+                            int16_t **pcm_out, size_t *samples_out)
+{
+    HMP3Decoder dec = MP3InitDecoder();
+    if (dec == NULL) {
+        return ESP_FAIL;
+    }
+
+    /* 诊断：打印 mp3 开头字节，确认是否从帧同步字（0xFF）开始 */
+    ESP_LOGI(TAG, "mp3 头: %02X %02X %02X %02X %02X %02X %02X %02X",
+             mp3_len > 0 ? mp3_data[0] : 0, mp3_len > 1 ? mp3_data[1] : 0,
+             mp3_len > 2 ? mp3_data[2] : 0, mp3_len > 3 ? mp3_data[3] : 0,
+             mp3_len > 4 ? mp3_data[4] : 0, mp3_len > 5 ? mp3_data[5] : 0,
+             mp3_len > 6 ? mp3_data[6] : 0, mp3_len > 7 ? mp3_data[7] : 0);
+
+    /* 跳过可能的 ID3v2 标签，从真正的 mp3 帧开始 */
+    size_t body_len = 0;
+    const uint8_t *body = skip_id3v2(mp3_data, mp3_len, &body_len);
+
+    unsigned char *in = (unsigned char *)body;
+    int bytes_left = (int)body_len;
+
+    /* 输出缓冲：动态扩容 */
+    size_t cap = 8192;
+    int16_t *out = malloc(cap * sizeof(int16_t));
+    if (out == NULL) {
+        MP3FreeDecoder(dec);
+        return ESP_ERR_NO_MEM;
+    }
+    size_t total = 0;
+
+    /* 单帧解码缓冲：MAX_NCHAN(2) * MAX_NSAMP(576) * MAX_NGRAN(2) = 2304 个 short，
+     * 用堆分配，避免 4608 字节爆掉 main task 的 3584 字节栈 */
+    short *frame = malloc(MAX_NCHAN * MAX_NSAMP * MAX_NGRAN * sizeof(short));
+    if (frame == NULL) {
+        free(out);
+        MP3FreeDecoder(dec);
+        return ESP_ERR_NO_MEM;
+    }
+
+    MP3FrameInfo fi;
+
+    while (bytes_left > 0) {
+        /* MP3Decode 返回 0 = 成功解码一帧，负数 = 错误 */
+        int err = MP3Decode(dec, &in, &bytes_left, frame, 0);
+        if (err != 0) {
+            ESP_LOGW(TAG, "MP3Decode 错误 %d（剩余 %d 字节，已解 %d 样本）", err, bytes_left, (int)total);
+            break;
+        }
+        MP3GetLastFrameInfo(dec, &fi);
+        int n = fi.outputSamps;
+        if (n <= 0) {
+            break;
+        }
+        if (total + (size_t)n > cap) {
+            while (cap < total + (size_t)n) {
+                cap *= 2;
+            }
+            int16_t *p = realloc(out, cap * sizeof(int16_t));
+            if (p == NULL) {
+                free(out);
+                free(frame);
+                MP3FreeDecoder(dec);
+                return ESP_ERR_NO_MEM;
+            }
+            out = p;
+        }
+        memcpy(out + total, frame, n * sizeof(short));
+        total += n;
+    }
+
+    free(frame);
+    MP3FreeDecoder(dec);
+
+    if (total == 0) {
+        free(out);
+        return ESP_FAIL;
+    }
+    *pcm_out = out;
+    *samples_out = total;
+    return ESP_OK;
+}
+
 esp_err_t cloud_tts(const char *text, int16_t **pcm_out, size_t *samples_out)
 {
     esp_err_t err = ESP_FAIL;
@@ -350,7 +457,7 @@ esp_err_t cloud_tts(const char *text, int16_t **pcm_out, size_t *samples_out)
     cJSON *input = cJSON_CreateObject();
     cJSON_AddStringToObject(input, "text", text);
     cJSON_AddStringToObject(input, "voice", TTS_VOICE);
-    cJSON_AddStringToObject(input, "format", "pcm");
+    cJSON_AddStringToObject(input, "format", "mp3");
     cJSON_AddNumberToObject(input, "sample_rate", CLOUD_SAMPLE_RATE);
     cJSON_AddItemToObject(root, "input", input);
 
@@ -389,16 +496,26 @@ esp_err_t cloud_tts(const char *text, int16_t **pcm_out, size_t *samples_out)
     audio_url[sizeof(audio_url) - 1] = '\0';
     cJSON_Delete(jresp);
 
-    /* 3. 下载音频（pcm 裸数据） */
+    /* 3. 下载音频（mp3 压缩数据） */
     uint8_t *audio_data = NULL;
     size_t audio_len = 0;
     err = http_request(audio_url, HTTP_METHOD_GET, NULL, NULL, 0, &audio_data, &audio_len);
     if (err != ESP_OK) {
         return err;
     }
-    ESP_LOGI(TAG, "下载音频 %d 字节", (int)audio_len);
+    ESP_LOGI(TAG, "下载音频 %d 字节（mp3）", (int)audio_len);
 
-    *pcm_out     = (int16_t *)audio_data;
-    *samples_out = audio_len / sizeof(int16_t);
+    /* 4. 解码 mp3 → pcm */
+    int16_t *pcm = NULL;
+    size_t pcm_samples = 0;
+    esp_err_t dec_err = mp3_to_pcm(audio_data, audio_len, &pcm, &pcm_samples);
+    free(audio_data);   /* mp3 原始数据用完即弃 */
+    if (dec_err != ESP_OK) {
+        ESP_LOGE(TAG, "mp3 解码失败");
+        return ESP_FAIL;
+    }
+
+    *pcm_out     = pcm;
+    *samples_out = pcm_samples;
     return ESP_OK;
 }

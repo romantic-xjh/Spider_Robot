@@ -1,6 +1,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -8,6 +9,7 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
 #include "nvs_flash.h"
 
 #include "microphone.h"
@@ -91,6 +93,23 @@ static void wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));   /* 关闭省电模式，防止空闲掉线 */
 
     xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
+}
+
+/* 同步系统时间：HTTPS 证书校验依赖正确时间，ESP32 无 RTC，需 NTP 同步 */
+static void sntp_sync_time(void)
+{
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
+    esp_netif_sntp_init(&cfg);
+
+    /* 最多等 10 秒 */
+    if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000)) != ESP_OK) {
+        ESP_LOGW(TAG, "时间同步超时，HTTPS 可能因证书校验失败");
+        return;
+    }
+
+    time_t now = 0;
+    time(&now);
+    ESP_LOGI(TAG, "时间已同步: %lld", (long long)now);
 }
 
 /* ==================== 工具函数 ==================== */
@@ -260,6 +279,9 @@ void app_main(void)
 
     /* 连接 WiFi */
     wifi_init_sta();
+
+    /* 同步系统时间（HTTPS 证书校验需要） */
+    sntp_sync_time();
 
     /* 初始化音频外设 */
     ESP_ERROR_CHECK(microphone_init());
