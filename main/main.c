@@ -15,6 +15,8 @@
 #include "microphone.h"
 #include "speaker.h"
 #include "cloud_ai.h"
+#include "pca9685_servo.h"
+#include "motor.h"
 
 static const char *TAG = "main";
 
@@ -51,6 +53,7 @@ typedef enum {
 
 static app_state_t s_state     = APP_SLEEP;
 static uint32_t    s_silent_ms = 0;
+static bool        s_motor_ok  = false;   /* PCA9685/舵机是否可用（init 失败时动作禁用） */
 
 static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_CONNECTED_BIT  BIT0
@@ -181,6 +184,77 @@ static const char *match_wake_word(const char *text)
     return NULL;
 }
 
+/* ==================== 动作指令（语音 -> motor 动作映射） ==================== */
+
+#define MOTOR_CMD_CYCLES   2     /* 语音指令默认步态周期数（1 周期 ≈ 1.6s） */
+#define MOTOR_SETTLE_MS    500   /* 动作结束后等舵机噪声衰减，防止麦克风误触发 */
+
+typedef enum {
+    MOTOR_ACTION_NONE = -1,
+    MOTOR_ACTION_STAND = 0,   /* 站立 / 回静止姿态 */
+    MOTOR_ACTION_RELEASE,     /* 全部舵机失力 */
+    MOTOR_ACTION_FORWARD,     /* 前进 */
+    MOTOR_ACTION_BACKWARD,    /* 后退 */
+    MOTOR_ACTION_LEFT,        /* 左移 */
+    MOTOR_ACTION_RIGHT,       /* 右移 */
+} motor_action_t;
+
+static const char *g_cmd_stand[]    = { "站立", "站好", "站起来", "起立", "停下", "停住" };
+static const char *g_cmd_release[]  = { "放松", "休息", "趴下" };
+static const char *g_cmd_forward[]  = { "前进", "向前走", "往前走" };
+static const char *g_cmd_backward[] = { "后退", "向后走", "往后退" };
+static const char *g_cmd_left[]     = { "左移", "向左走", "往左走" };
+static const char *g_cmd_right[]    = { "右移", "向右走", "往右走" };
+
+typedef struct {
+    const char   **words;
+    size_t         count;
+    motor_action_t action;
+} motor_cmd_entry_t;
+
+#define CMD_ENTRY(arr, act)  { arr, sizeof(arr) / sizeof(arr[0]), act }
+
+static const motor_cmd_entry_t g_motor_cmds[] = {
+    CMD_ENTRY(g_cmd_stand,    MOTOR_ACTION_STAND),
+    CMD_ENTRY(g_cmd_release,  MOTOR_ACTION_RELEASE),
+    CMD_ENTRY(g_cmd_forward,  MOTOR_ACTION_FORWARD),
+    CMD_ENTRY(g_cmd_backward, MOTOR_ACTION_BACKWARD),
+    CMD_ENTRY(g_cmd_left,     MOTOR_ACTION_LEFT),
+    CMD_ENTRY(g_cmd_right,    MOTOR_ACTION_RIGHT),
+};
+#define MOTOR_CMD_COUNT  (sizeof(g_motor_cmds) / sizeof(g_motor_cmds[0]))
+
+/* 在句子里找动作指令词（子串匹配），命中返回动作，否则 MOTOR_ACTION_NONE */
+static motor_action_t match_motor_cmd(const char *text)
+{
+    for (size_t i = 0; i < MOTOR_CMD_COUNT; i++) {
+        for (size_t j = 0; j < g_motor_cmds[i].count; j++) {
+            if (strstr(text, g_motor_cmds[i].words[j]) != NULL) {
+                return g_motor_cmds[i].action;
+            }
+        }
+    }
+    return MOTOR_ACTION_NONE;
+}
+
+/* 执行动作（阻塞式：动作期间不响应语音，走完才返回） */
+static void run_motor_action(motor_action_t action)
+{
+    esp_err_t ret = ESP_OK;
+    switch (action) {
+    case MOTOR_ACTION_STAND:    ret = motor_stand();                       break;
+    case MOTOR_ACTION_RELEASE:  ret = motor_release();                     break;
+    case MOTOR_ACTION_FORWARD:  ret = motor_walk_forward(MOTOR_CMD_CYCLES);  break;
+    case MOTOR_ACTION_BACKWARD: ret = motor_walk_backward(MOTOR_CMD_CYCLES); break;
+    case MOTOR_ACTION_LEFT:     ret = motor_walk_left(MOTOR_CMD_CYCLES);     break;
+    case MOTOR_ACTION_RIGHT:    ret = motor_walk_right(MOTOR_CMD_CYCLES);    break;
+    default: break;
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "动作执行失败: 0x%x", (int)ret);
+    }
+}
+
 /* ==================== 语音处理 ==================== */
 
 /* 录音 → ASR → 匹配唤醒词 → LLM → TTS → 播放。返回是否真正唤醒 */
@@ -247,6 +321,17 @@ static bool handle_speech(int16_t *pcm)
     }
     ESP_LOGI(TAG, "问句: %s", q);
 
+    /* 3.5 动作指令：命中本地指令词直接驱动舵机，不走云端 */
+    if (s_motor_ok) {
+        motor_action_t action = match_motor_cmd(q);
+        if (action != MOTOR_ACTION_NONE) {
+            ESP_LOGI(TAG, "执行动作: %d", (int)action);
+            run_motor_action(action);
+            vTaskDelay(pdMS_TO_TICKS(MOTOR_SETTLE_MS));
+            return true;   /* 保持唤醒状态 */
+        }
+    }
+
     /* 4. 大模型对话 */
     static char reply[1024];
     if (cloud_llm(q, reply, sizeof(reply)) != ESP_OK) {
@@ -286,6 +371,15 @@ void app_main(void)
     /* 初始化音频外设 */
     ESP_ERROR_CHECK(microphone_init());
     ESP_ERROR_CHECK(speaker_init());
+
+    /* 初始化舵机驱动（PCA9685）：失败只禁用动作功能，不影响语音 */
+    esp_err_t motor_err = pca9685_servo_init();
+    s_motor_ok = (motor_err == ESP_OK);
+    if (s_motor_ok) {
+        motor_stand();   /* 上电建立站立姿态 */
+    } else {
+        ESP_LOGE(TAG, "PCA9685 初始化失败(0x%x)，动作功能禁用", motor_err);
+    }
 
     int16_t *frame = malloc(FRAME_SAMPLES * sizeof(int16_t));
     int16_t *pcm   = malloc(RECORD_SAMPLES * sizeof(int16_t));

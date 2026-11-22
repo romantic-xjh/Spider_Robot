@@ -11,5 +11,6 @@
     "IDF_TARGET": "esp32s3"
   },
   "idf.portWin": "COM3",
-  "idf.flashType": "UART"
+  "idf.flashType": "UART",
+  "idf.currentSetup": "C:\\Espressif\\frameworks\\esp-idf-v5.1.2"
 }
