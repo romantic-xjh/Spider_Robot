@@ -27,8 +27,8 @@ static const char *TAG = "main";
 #define ASR_RETRY_COUNT         2        /* ASR 失败后的重试次数（不含首次），即总共最多 3 次 */
 
 /* ==================== 触发 / 休眠参数 ==================== */
-#define TRIGGER_RMS_THRESHOLD   500      /* 检测到说话的阈值（RMS），可调 */
-#define SILENCE_RMS_THRESHOLD   200      /* 静音阈值（RMS），低于它算静音，可调 */
+#define TRIGGER_RMS_THRESHOLD   1000      /* 检测到说话的阈值（RMS），可调 */
+#define SILENCE_RMS_THRESHOLD   400      /* 静音阈值（RMS），低于它算静音，可调 */
 #define SLEEP_AFTER_SILENCE_MS  10000    /* 连续 10 秒静音后进入休眠 */
 
 /* ==================== 唤醒词（从长到短，避免前缀误匹配） ==================== */
@@ -167,32 +167,34 @@ static const char *match_wake_word(const char *text)
 /* 录音 → ASR → 匹配唤醒词 → LLM → TTS → 播放。返回是否真正唤醒 */
 static bool handle_speech(int16_t *pcm)
 {
+    /* 1~2. 录音 → ASR（失败播提示音重试，最多 ASR_RETRY_COUNT 次重试） */
     static char text[512];
     bool recognized = false;
-
-    /* 录音 → ASR：云端返回错误时立即重试（共 ASR_RETRY_COUNT 次重试），
-     * 期间不退监听，每次重新录音、继续等用户说话 */
     for (int attempt = 0; attempt <= ASR_RETRY_COUNT; attempt++) {
-        /* 1. 录音 */
+        if (attempt > 0) {
+            /* 重试前播提示音，等 150ms 让回声衰减 */
+            int16_t *a = NULL;
+            size_t n = 0;
+            if (cloud_tts("请再说一次", &a, &n) == ESP_OK) {
+                speaker_play(a, n, portMAX_DELAY);
+                free(a);
+            }
+            vTaskDelay(pdMS_TO_TICKS(150));
+        }
+
         size_t total = 0;
         microphone_read(pcm, RECORD_SAMPLES, &total,
                         pdMS_TO_TICKS(RECORD_SECONDS * 1000 + 500));
         if (total == 0) {
-            ESP_LOGE(TAG, "录音为空，退回监听");
-            return false;
+            ESP_LOGW(TAG, "录音为空（第 %d/%d 次）", attempt + 1, ASR_RETRY_COUNT + 1);
+            continue;
         }
-
-        /* 2. ASR 识别 */
         if (cloud_asr(pcm, total, text, sizeof(text)) == ESP_OK) {
             recognized = true;
             break;
         }
-
-        ESP_LOGW(TAG, "语音识别失败（第 %d/%d 次）%s",
-                 attempt + 1, ASR_RETRY_COUNT + 1,
-                 attempt < ASR_RETRY_COUNT ? "，立即重试" : "，放弃");
+        ESP_LOGW(TAG, "语音识别失败（第 %d/%d 次）", attempt + 1, ASR_RETRY_COUNT + 1);
     }
-
     if (!recognized) {
         return false;
     }
