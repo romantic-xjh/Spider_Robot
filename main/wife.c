@@ -89,8 +89,8 @@ static void wifi_init_apsta(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "热点已开: %s -> 192.168.4.1:%d（同时连路由器 %s）",
-             WIFE_AP_SSID, WIFE_TCP_PORT, WIFE_STA_SSID);
+    ESP_LOGI(TAG, "已开自身热点(AP): %s 密码 %s，手机连它后访问 192.168.4.1:%d；后台尝试连路由器(STA): %s",
+             WIFE_AP_SSID, WIFE_AP_PASS, WIFE_TCP_PORT, WIFE_STA_SSID);
 }
 
 /* ==================== 指令解析 ==================== */

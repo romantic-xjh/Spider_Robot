@@ -28,7 +28,7 @@ extern "C" {
 /* ==================== WiFi 配置（按实际修改） ==================== */
 #define WIFE_AP_SSID       "SpiderRobot"   /* 手机要连的热点名 */
 #define WIFE_AP_PASS       "12345678"      /* 热点密码（≥8 位） */
-#define WIFE_AP_CHANNEL    1
+#define WIFE_AP_CHANNEL    6
 #define WIFE_AP_MAX_CONN   1               /* 一次只连一个手机 */
 
 #define WIFE_STA_SSID      "1"             /* ESP32 联网用的路由器 SSID */

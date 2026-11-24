@@ -34,6 +34,11 @@ esp_err_t speaker_init(void);
 esp_err_t speaker_play(const int16_t *buf, size_t samples, TickType_t timeout);
 
 /**
+ * 播放结束后冲刷静音，消除扬声器残留震动噪声
+ */
+esp_err_t speaker_stop(void);
+
+/**
  * 释放 I2S 扬声器资源
  */
 esp_err_t speaker_deinit(void);

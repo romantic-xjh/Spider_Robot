@@ -45,8 +45,19 @@ esp_err_t speaker_play(const int16_t *buf, size_t samples, TickType_t timeout)
 
     size_t bytes_written = 0;
     esp_err_t ret = i2s_channel_write(s_tx_chan, buf, samples * sizeof(int16_t), &bytes_written, timeout);
-    ESP_LOGI(TAG, "I2S 写入 %d / %d 字节", (int)bytes_written, (int)(samples * sizeof(int16_t)));
     return ret;
+}
+
+esp_err_t speaker_stop(void)
+{
+    if (s_tx_chan == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* 播放结束后写一段静音，冲刷 I2S 残留数据，
+     * 避免 MAX98357A 在无新数据时反复输出残留导致震动噪声 */
+    static const int16_t silence[512] = {0};
+    size_t bytes_written = 0;
+    return i2s_channel_write(s_tx_chan, silence, sizeof(silence), &bytes_written, portMAX_DELAY);
 }
 
 esp_err_t speaker_deinit(void)

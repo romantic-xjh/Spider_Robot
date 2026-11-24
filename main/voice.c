@@ -28,6 +28,8 @@
 #include "esp_mn_iface.h"
 #include "esp_tts.h"
 #include "esp_tts_voice_xiaole.h"
+#include "esp_partition.h"
+#include "spi_flash_mmap.h"
 #include "esp_mn_models.h"
 #include "esp_mn_speech_commands.h"
 #include "model_path.h"
@@ -43,6 +45,7 @@ static model_iface_data_t *s_model_data = NULL;
 static volatile voice_cmd_t s_cmd = VOICE_CMD_NONE;
 
 static esp_tts_handle_t s_tts = NULL;   /* 中文 TTS 句柄（唤醒后播放「我在」） */
+static spi_flash_mmap_handle_t s_tts_mmap = 0;  /* voice_data 分区映射句柄（常驻，勿 unmap） */
 
 /* 命令词表：拼音(空格分隔) -> 语音命令 */
 static const struct {
@@ -50,7 +53,7 @@ static const struct {
     voice_cmd_t  cmd;
 } s_commands[] = {
     { "qian jin", VOICE_CMD_FORWARD },   /* 0: 前进 */
-    { "xiao zhi", VOICE_CMD_NONE    },   /* 1: 小智（唤醒词，走 TTS） */
+    { "nai long nai long", VOICE_CMD_NONE },   /* 1: 奶龙奶龙（唤醒词，走 TTS） */
 };
 #define VOICE_CMD_COUNT (sizeof(s_commands) / sizeof(s_commands[0]))
 #define CMD_ID_FORWARD   0
@@ -88,6 +91,7 @@ static void voice_play_text(const char *text)
         data = esp_tts_stream_play(s_tts, &len, 3);
     }
     esp_tts_stream_reset(s_tts);
+    speaker_stop();   /* 冲刷残留，消除播完后的震动噪声 */
 }
 
 /* ==================== 联网对话：录音（静音检测切段） ==================== */
@@ -95,8 +99,8 @@ static void voice_play_text(const char *text)
 #define RECORD_SAMPLE_RATE  16000   /* 与麦克风/云端一致 */
 #define RECORD_CHUNK        512     /* 每次读 512 样本 ≈ 32ms */
 #define RECORD_SILENCE_MS   900     /* 连续静音 900ms 判定说话结束 */
-#define RECORD_MAX_MS       10000   /* 最长录音 10 秒 */
-#define RECORD_WAIT_MAX     50      /* 最多等 50 次(≈5s)开始说话 */
+#define RECORD_MAX_MS       3000    /* 最长录音 3 秒 */
+#define RECORD_WAIT_MAX     312     /* 最多等 312 次(≈10s)开始说话 */
 
 /**
  * @brief 录音直到静音切段：等用户开口，检测到连续静音即停。
@@ -130,7 +134,7 @@ static esp_err_t voice_record(int16_t **pcm_out, size_t *samples_out)
             if (voice) {
                 started = true;
             } else if (++no_speech >= RECORD_WAIT_MAX) {
-                ESP_LOGW(TAG, "唤醒后 5 秒未检测到语音，取消录音");
+                ESP_LOGW(TAG, "唤醒后 10 秒未检测到语音，取消录音");
                 free(pcm);
                 free(tmp);
                 return ESP_FAIL;
@@ -212,38 +216,44 @@ static void voice_task(void *arg)
                 if (!wife_is_connected()) {
                     voice_play_text("我在");
 
-                    /* 联网交流：录音 → ASR → LLM → TTS → 播放 */
-                    int16_t *pcm = NULL;
-                    size_t samples = 0;
-                    if (voice_record(&pcm, &samples) != ESP_OK) {
-                        ESP_LOGW(TAG, "录音失败或无语音输入");
-                        continue;
-                    }
+                    /* 持续对话态：唤醒一次后连续多轮问答，直到静音超时(约10秒)才退出 */
+                    while (1) {
+                        int16_t *pcm = NULL;
+                        size_t samples = 0;
+                        if (voice_record(&pcm, &samples) != ESP_OK) {
+                            ESP_LOGW(TAG, "静音超时，退出对话，等待下次唤醒");
+                            break;
+                        }
 
-                    char text[256];
-                    if (cloud_asr(pcm, samples, text, sizeof(text)) != ESP_OK) {
-                        ESP_LOGE(TAG, "云端 ASR 失败");
+                        char text[256];
+                        if (cloud_asr(pcm, samples, text, sizeof(text)) != ESP_OK) {
+                            ESP_LOGE(TAG, "云端 ASR 失败");
+                            free(pcm);
+                            continue;
+                        }
                         free(pcm);
-                        continue;
-                    }
-                    free(pcm);
-                    ESP_LOGI(TAG, "识别文字: %s", text);
+                        ESP_LOGI(TAG, "识别文字: %s", text);
 
-                    char reply[512];
-                    if (cloud_llm(text, reply, sizeof(reply)) != ESP_OK) {
-                        ESP_LOGE(TAG, "云端 LLM 失败");
-                        continue;
-                    }
-                    ESP_LOGI(TAG, "LLM 回复: %s", reply);
+                        char reply[512];
+                        if (cloud_llm(text, reply, sizeof(reply)) != ESP_OK) {
+                            ESP_LOGE(TAG, "云端 LLM 失败");
+                            continue;
+                        }
+                        ESP_LOGI(TAG, "LLM 回复: %s", reply);
 
-                    int16_t *tts_pcm = NULL;
-                    size_t tts_samples = 0;
-                    if (cloud_tts(reply, &tts_pcm, &tts_samples) != ESP_OK) {
-                        ESP_LOGE(TAG, "云端 TTS 失败");
-                        continue;
+                        int16_t *tts_pcm = NULL;
+                        size_t tts_samples = 0;
+                        if (cloud_tts(reply, &tts_pcm, &tts_samples) != ESP_OK) {
+                            ESP_LOGE(TAG, "云端 TTS 失败");
+                            continue;
+                        }
+                        speaker_play(tts_pcm, tts_samples, portMAX_DELAY);
+                        free(tts_pcm);
+                        speaker_stop();   /* 冲刷 AI 回答播完后的残留 */
+
+                        /* 提示用户可以继续说话了 */
+                        voice_play_text("继续");
                     }
-                    speaker_play(tts_pcm, tts_samples, portMAX_DELAY);
-                    free(tts_pcm);
                 }
             }
         }
@@ -265,13 +275,28 @@ esp_err_t voice_init(void)
     if (speaker_init() != ESP_OK) {
         ESP_LOGW(TAG, "扬声器初始化失败，唤醒词将无语音回应");
     }
-    esp_tts_voice_t *tts_voice = esp_tts_voice_set_init(&esp_tts_voice_xiaole, NULL);
-    if (tts_voice == NULL) {
-        ESP_LOGW(TAG, "TTS 音色初始化失败");
+    /* TTS 语音数据来自 voice_data 分区：esp_tts_voice_set_init 第二个参数必须是有效
+     * 数据指针（传 NULL 会在其内部解引用 *(data+20) 时崩溃），故先 mmap 分区。 */
+    const esp_partition_t *tts_part = esp_partition_find_first(
+            ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "voice_data");
+    if (tts_part == NULL) {
+        ESP_LOGW(TAG, "未找到 voice_data 分区，TTS 不可用");
     } else {
-        s_tts = esp_tts_create(tts_voice);
-        if (s_tts == NULL) {
-            ESP_LOGW(TAG, "TTS 创建失败");
+        const void *tts_voicedata = NULL;
+        esp_err_t map_err = esp_partition_mmap(tts_part, 0, tts_part->size,
+                                               SPI_FLASH_MMAP_DATA, &tts_voicedata, &s_tts_mmap);
+        if (map_err != ESP_OK) {
+            ESP_LOGW(TAG, "voice_data 分区映射失败(0x%x)，TTS 不可用", map_err);
+        } else {
+            esp_tts_voice_t *tts_voice = esp_tts_voice_set_init(&esp_tts_voice_xiaole, (void *)tts_voicedata);
+            if (tts_voice == NULL) {
+                ESP_LOGW(TAG, "TTS 音色初始化失败");
+            } else {
+                s_tts = esp_tts_create(tts_voice);
+                if (s_tts == NULL) {
+                    ESP_LOGW(TAG, "TTS 创建失败");
+                }
+            }
         }
     }
 
