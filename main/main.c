@@ -197,6 +197,8 @@ typedef enum {
     MOTOR_ACTION_BACKWARD,    /* 后退 */
     MOTOR_ACTION_LEFT,        /* 左移 */
     MOTOR_ACTION_RIGHT,       /* 右移 */
+    MOTOR_ACTION_TURN_LEFT,   /* 左转向 */
+    MOTOR_ACTION_TURN_RIGHT,  /* 右转向 */
 } motor_action_t;
 
 static const char *g_cmd_stand[]    = { "站立", "站好", "站起来", "起立", "停下", "停住" };
@@ -205,6 +207,8 @@ static const char *g_cmd_forward[]  = { "前进", "向前走", "往前走" };
 static const char *g_cmd_backward[] = { "后退", "向后走", "往后退" };
 static const char *g_cmd_left[]     = { "左移", "向左走", "往左走" };
 static const char *g_cmd_right[]    = { "右移", "向右走", "往右走" };
+static const char *g_cmd_turn_left[]  = { "左转", "向左转", "往左转" };
+static const char *g_cmd_turn_right[] = { "右转", "向右转", "往右转" };
 
 typedef struct {
     const char   **words;
@@ -221,6 +225,8 @@ static const motor_cmd_entry_t g_motor_cmds[] = {
     CMD_ENTRY(g_cmd_backward, MOTOR_ACTION_BACKWARD),
     CMD_ENTRY(g_cmd_left,     MOTOR_ACTION_LEFT),
     CMD_ENTRY(g_cmd_right,    MOTOR_ACTION_RIGHT),
+    CMD_ENTRY(g_cmd_turn_left,  MOTOR_ACTION_TURN_LEFT),
+    CMD_ENTRY(g_cmd_turn_right, MOTOR_ACTION_TURN_RIGHT),
 };
 #define MOTOR_CMD_COUNT  (sizeof(g_motor_cmds) / sizeof(g_motor_cmds[0]))
 
@@ -248,6 +254,8 @@ static void run_motor_action(motor_action_t action)
     case MOTOR_ACTION_BACKWARD: ret = motor_walk_backward(MOTOR_CMD_CYCLES); break;
     case MOTOR_ACTION_LEFT:     ret = motor_walk_left(MOTOR_CMD_CYCLES);     break;
     case MOTOR_ACTION_RIGHT:    ret = motor_walk_right(MOTOR_CMD_CYCLES);    break;
+    case MOTOR_ACTION_TURN_LEFT:  ret = motor_turn_left(MOTOR_CMD_CYCLES);   break;
+    case MOTOR_ACTION_TURN_RIGHT: ret = motor_turn_right(MOTOR_CMD_CYCLES);  break;
     default: break;
     }
     if (ret != ESP_OK) {
@@ -357,72 +365,79 @@ static bool handle_speech(int16_t *pcm)
 
 void app_main(void)
 {
-    /* 基础初始化 */
-    ESP_ERROR_CHECK(nvs_flash_init());
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(pca9685_servo_init());
 
-    /* 连接 WiFi */
-    wifi_init_sta();
+    motor_stand();
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
-    /* 同步系统时间（HTTPS 证书校验需要） */
-    sntp_sync_time();
 
-    /* 初始化音频外设 */
-    ESP_ERROR_CHECK(microphone_init());
-    ESP_ERROR_CHECK(speaker_init());
 
-    /* 初始化舵机驱动（PCA9685）：失败只禁用动作功能，不影响语音 */
-    esp_err_t motor_err = pca9685_servo_init();
-    s_motor_ok = (motor_err == ESP_OK);
-    if (s_motor_ok) {
-        motor_stand();   /* 上电建立站立姿态 */
-    } else {
-        ESP_LOGE(TAG, "PCA9685 初始化失败(0x%x)，动作功能禁用", motor_err);
-    }
+    // /* 基础初始化 */
+    // ESP_ERROR_CHECK(nvs_flash_init());
+    // ESP_ERROR_CHECK(esp_netif_init());
+    // ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    int16_t *frame = malloc(FRAME_SAMPLES * sizeof(int16_t));
-    int16_t *pcm   = malloc(RECORD_SAMPLES * sizeof(int16_t));
-    if (frame == NULL || pcm == NULL) {
-        ESP_LOGE(TAG, "内存分配失败");
-        return;
-    }
+    // /* 连接 WiFi */
+    // wifi_init_sta();
 
-    ESP_LOGI(TAG, "启动");
+    // /* 同步系统时间（HTTPS 证书校验需要） */
+    // sntp_sync_time();
 
-    while (1) {
-        /* 读一帧音频（20 ms） */
-        size_t got = 0;
-        if (microphone_read(frame, FRAME_SAMPLES, &got, portMAX_DELAY) != ESP_OK || got == 0) {
-            continue;
-        }
+    // /* 初始化音频外设 */
+    // ESP_ERROR_CHECK(microphone_init());
+    // ESP_ERROR_CHECK(speaker_init());
 
-        float rms = rms_of(frame, got);
+    // /* 初始化舵机驱动（PCA9685）：失败只禁用动作功能，不影响语音 */
+    // esp_err_t motor_err = pca9685_servo_init();
+    // s_motor_ok = (motor_err == ESP_OK);
+    // if (s_motor_ok) {
+    //     motor_stand();   /* 上电建立站立姿态 */
+    // } else {
+    //     ESP_LOGE(TAG, "PCA9685 初始化失败(0x%x)，动作功能禁用", motor_err);
+    // }
 
-        /* 检测到说话 → 录音并处理 */
-        if (rms > TRIGGER_RMS_THRESHOLD) {
-            ESP_LOGI(TAG, "收到语音");
-            bool woke = handle_speech(pcm);
-            if (woke) {
-                s_state     = APP_ACTIVE;
-                s_silent_ms = 0;
-            }
-            continue;
-        }
+    // int16_t *frame = malloc(FRAME_SAMPLES * sizeof(int16_t));
+    // int16_t *pcm   = malloc(RECORD_SAMPLES * sizeof(int16_t));
+    // if (frame == NULL || pcm == NULL) {
+    //     ESP_LOGE(TAG, "内存分配失败");
+    //     return;
+    // }
 
-        /* 活跃状态下检测静音，超时进入休眠 */
-        if (s_state == APP_ACTIVE) {
-            if (rms < SILENCE_RMS_THRESHOLD) {
-                s_silent_ms += 20;      /* 每帧 20 ms */
-                if (s_silent_ms >= SLEEP_AFTER_SILENCE_MS) {
-                    s_state     = APP_SLEEP;
-                    s_silent_ms = 0;
-                    ESP_LOGI(TAG, "休眠");
-                }
-            } else {
-                s_silent_ms = 0;
-            }
-        }
-        /* APP_SLEEP：只等触发 */
-    }
+    // ESP_LOGI(TAG, "启动");
+
+    // while (1) {
+    //     /* 读一帧音频（20 ms） */
+    //     size_t got = 0;
+    //     if (microphone_read(frame, FRAME_SAMPLES, &got, portMAX_DELAY) != ESP_OK || got == 0) {
+    //         continue;
+    //     }
+
+    //     float rms = rms_of(frame, got);
+
+    //     /* 检测到说话 → 录音并处理 */
+    //     if (rms > TRIGGER_RMS_THRESHOLD) {
+    //         ESP_LOGI(TAG, "收到语音");
+    //         bool woke = handle_speech(pcm);
+    //         if (woke) {
+    //             s_state     = APP_ACTIVE;
+    //             s_silent_ms = 0;
+    //         }
+    //         continue;
+    //     }
+
+    //     /* 活跃状态下检测静音，超时进入休眠 */
+    //     if (s_state == APP_ACTIVE) {
+    //         if (rms < SILENCE_RMS_THRESHOLD) {
+    //             s_silent_ms += 20;      /* 每帧 20 ms */
+    //             if (s_silent_ms >= SLEEP_AFTER_SILENCE_MS) {
+    //                 s_state     = APP_SLEEP;
+    //                 s_silent_ms = 0;
+    //                 ESP_LOGI(TAG, "休眠");
+    //             }
+    //         } else {
+    //             s_silent_ms = 0;
+    //         }
+    //     }
+    //     /* APP_SLEEP：只等触发 */
+    // }
 }
