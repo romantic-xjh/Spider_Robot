@@ -369,8 +369,23 @@ void app_main(void)
 
     motor_stand();
     vTaskDelay(pdMS_TO_TICKS(1000));
+    uint8_t a = 0;
 
+    while (1)
+    {
+        if(a == 0)
+        {
+            a = 1;
+            TickType_t start = xTaskGetTickCount();
 
+            while (xTaskGetTickCount() - start < pdMS_TO_TICKS(10000))
+            {
+                motor_walk_right(1); /* 实时时钟每次进循环时由函数内部读取 */
+            }
+
+            motor_stand();
+        }
+    }
 
     // /* 基础初始化 */
     // ESP_ERROR_CHECK(nvs_flash_init());

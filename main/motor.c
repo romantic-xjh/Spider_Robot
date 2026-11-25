@@ -108,7 +108,7 @@ static const float HIP_PLAN_C_HALF1[4] = {160.0f, 25.0f, 41.0f, 135.0f};
 
 /* 方案D：左移（朝 BD 边运动），角色与方案C互换；端点按实机调整（2026-11-25），
  * 不再与方案C共用：A_R 摆动端 155→160、B_R 支撑端 25→20、D_R 支撑端 155→150 */
-static const float HIP_PLAN_D_HALF1[4] = { 135.0f, 45.0f, 25.0f, 150.0f };
+static const float HIP_PLAN_D_HALF1[4] = { 135.0f, 45.0f, 22.0f, 150.0f };
 static const float HIP_PLAN_D_HALF2[4] = { 160.0f, 20.0f, 45.0f, 135.0f };
 
 /*
